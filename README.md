@@ -33,7 +33,7 @@ configurable review endpoint.
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - A [Tigris](https://www.tigrisdata.com) account with a bucket created
 - The [Tigris CLI](https://www.tigrisdata.com/docs/cli/) (`tigris` or `t3`)
 - An [Anthropic API key](https://console.anthropic.com/)
@@ -67,6 +67,8 @@ Start both agents in separate terminals:
 # Terminal 1: Ingest Agent
 export AWS_ACCESS_KEY_ID="tid_..."
 export AWS_SECRET_ACCESS_KEY="tsec_..."
+export AWS_REGION=auto
+export AWS_ENDPOINT_URL_S3=https://t3.storage.dev
 export BUCKET_NAME="moderation-pipeline"
 export ANTHROPIC_API_KEY="sk-ant-..."
 go run ./cmd/ingest
@@ -74,6 +76,8 @@ go run ./cmd/ingest
 # Terminal 2: Router Agent
 export AWS_ACCESS_KEY_ID="tid_..."
 export AWS_SECRET_ACCESS_KEY="tsec_..."
+export AWS_REGION=auto
+export AWS_ENDPOINT_URL_S3=https://t3.storage.dev
 export BUCKET_NAME="moderation-pipeline"
 export WEBHOOK_SECRET="my-secret-token"
 export REVIEW_WEBHOOK_URL="https://example.com/review"
