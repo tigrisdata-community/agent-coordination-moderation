@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +13,9 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/facebookgo/flagenv"
+	_ "github.com/joho/godotenv/autoload"
 	"github.com/tigrisdata/agent-coordination-moderation/internal/classify"
 	"github.com/tigrisdata/agent-coordination-moderation/internal/store"
 )
@@ -27,23 +31,34 @@ type submitResponse struct {
 	Status string `json:"status"`
 }
 
-func main() {
-	bucketName := os.Getenv("BUCKET_NAME")
-	if bucketName == "" {
-		slog.Error("BUCKET_NAME is required")
-		os.Exit(1)
-	}
+var (
+	claudeBaseURL = flag.String("anthropic-base-url", "", "custom base URL for the Anthropic API")
+	claudeAPIKey  = flag.String("anthropic-api-key", "", "Anthropic API key (falls back to SDK default env lookup if empty)")
+	bucketName    = flag.String("bucket-name", "", "Tigris bucket name (required)")
+	port          = flag.String("port-ingest", "8080", "HTTP port to listen on")
+)
 
-	port := os.Getenv("PORT_INGEST")
-	if port == "" {
-		port = "8080"
+func main() {
+	flagenv.Parse()
+	flag.Parse()
+
+	if *bucketName == "" {
+		slog.Error("bucket-name is required")
+		os.Exit(1)
 	}
 
 	ctx := context.Background()
 
-	claude := anthropic.NewClient()
+	var claudeOpts []option.RequestOption
+	if *claudeBaseURL != "" {
+		claudeOpts = append(claudeOpts, option.WithBaseURL(*claudeBaseURL))
+	}
+	if *claudeAPIKey != "" {
+		claudeOpts = append(claudeOpts, option.WithAPIKey(*claudeAPIKey))
+	}
+	claude := anthropic.NewClient(claudeOpts...)
 
-	st, err := store.New(ctx, bucketName)
+	st, err := store.New(ctx, *bucketName)
 	if err != nil {
 		slog.Error("failed to create store", "error", err)
 		os.Exit(1)
@@ -54,7 +69,7 @@ func main() {
 	mux.HandleFunc("POST /submit", handleSubmit(claude, st, &wg))
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + *port,
 		Handler: mux,
 	}
 
@@ -70,7 +85,7 @@ func main() {
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	slog.Info("ingest agent listening", "port", port)
+	slog.Info("ingest agent listening", "port", *port)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
 		os.Exit(1)

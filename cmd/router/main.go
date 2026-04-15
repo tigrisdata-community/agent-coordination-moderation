@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/facebookgo/flagenv"
+	_ "github.com/joho/godotenv/autoload"
 	"github.com/tigrisdata/agent-coordination-moderation/internal/classify"
 	"github.com/tigrisdata/agent-coordination-moderation/internal/store"
 	"github.com/tigrisdata/agent-coordination-moderation/internal/webhook"
@@ -51,28 +55,29 @@ func (d *deduper) cleanup(maxAge time.Duration) {
 	}
 }
 
+var (
+	bucketName    = flag.String("bucket-name", "", "Tigris bucket name (required)")
+	webhookSecret = flag.String("webhook-secret", "", "Bearer token required on /webhook (required)")
+	reviewURL     = flag.String("review-webhook-url", "", "Slack incoming webhook URL to POST flagged content notifications to")
+	port          = flag.String("port-router", "8081", "HTTP port to listen on")
+)
+
 func main() {
-	bucketName := os.Getenv("BUCKET_NAME")
-	if bucketName == "" {
-		slog.Error("BUCKET_NAME is required")
+	flagenv.Parse()
+	flag.Parse()
+
+	if *bucketName == "" {
+		slog.Error("bucket-name is required")
 		os.Exit(1)
 	}
-
-	webhookSecret := os.Getenv("WEBHOOK_SECRET")
-	if webhookSecret == "" {
-		slog.Error("WEBHOOK_SECRET is required")
+	if *webhookSecret == "" {
+		slog.Error("webhook-secret is required")
 		os.Exit(1)
-	}
-
-	reviewURL := os.Getenv("REVIEW_WEBHOOK_URL")
-	port := os.Getenv("PORT_ROUTER")
-	if port == "" {
-		port = "8081"
 	}
 
 	ctx := context.Background()
 
-	st, err := store.New(ctx, bucketName)
+	st, err := store.New(ctx, *bucketName)
 	if err != nil {
 		slog.Error("failed to create store", "error", err)
 		os.Exit(1)
@@ -90,11 +95,11 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	handler := handleWebhook(st, dedup, reviewURL)
-	mux.Handle("POST /webhook", webhook.VerifyBearer(webhookSecret, handler))
+	handler := handleWebhook(st, dedup, *reviewURL)
+	mux.Handle("POST /webhook", webhook.VerifyBearer(*webhookSecret, handler))
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + *port,
 		Handler: mux,
 	}
 
@@ -109,7 +114,7 @@ func main() {
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	slog.Info("router agent listening", "port", port)
+	slog.Info("router agent listening", "port", *port)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
@@ -219,7 +224,7 @@ func processEvent(ctx context.Context, st *store.Store, dedup *deduper, reviewUR
 }
 
 func notifyReview(ctx context.Context, reviewURL string, result *classify.ClassificationResult) error {
-	body, err := json.Marshal(result)
+	body, err := json.Marshal(slackPayload(result))
 	if err != nil {
 		return err
 	}
@@ -243,6 +248,57 @@ func notifyReview(ctx context.Context, reviewURL string, result *classify.Classi
 		return &reviewError{statusCode: resp.StatusCode}
 	}
 	return nil
+}
+
+// slackPayload shapes a classification result into a Slack incoming webhook
+// message with Block Kit formatting.
+func slackPayload(result *classify.ClassificationResult) map[string]any {
+	var flagged []string
+	for _, cat := range result.Categories {
+		if cat.Flagged {
+			flagged = append(flagged, fmt.Sprintf("%s (%.2f)", cat.Name, cat.Confidence))
+		}
+	}
+	flaggedText := "none"
+	if len(flagged) > 0 {
+		flaggedText = strings.Join(flagged, ", ")
+	}
+
+	text := fmt.Sprintf(":rotating_light: Flagged content `%s` (confidence %.2f)", result.ID, result.Confidence)
+
+	fields := []map[string]any{
+		{"type": "mrkdwn", "text": fmt.Sprintf("*ID:*\n%s", result.ID)},
+		{"type": "mrkdwn", "text": fmt.Sprintf("*Confidence:*\n%.2f", result.Confidence)},
+		{"type": "mrkdwn", "text": fmt.Sprintf("*Categories:*\n%s", flaggedText)},
+	}
+	if result.MediaURL != "" {
+		fields = append(fields, map[string]any{"type": "mrkdwn", "text": fmt.Sprintf("*Media:*\n<%s>", result.MediaURL)})
+	}
+
+	return map[string]any{
+		"text": text,
+		"blocks": []map[string]any{
+			{
+				"type": "section",
+				"text": map[string]any{"type": "mrkdwn", "text": text},
+			},
+			{
+				"type":   "section",
+				"fields": fields,
+			},
+			{
+				"type": "section",
+				"text": map[string]any{"type": "mrkdwn", "text": fmt.Sprintf("*Content:*\n```%s```", truncate(result.Text, 2000))},
+			},
+		},
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 type reviewError struct {
